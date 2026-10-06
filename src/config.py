@@ -105,7 +105,7 @@ class Config:
             gmail_query=os.environ.get("GMAIL_QUERY", "label:phishing-reports is:unread"),
             gmail_credentials_path=os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json"),
             gmail_token_path=os.environ.get("GMAIL_TOKEN_PATH", "token.json"),
-            claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
+            claude_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5"),
             findings_db_path=os.environ.get("FINDINGS_DB_PATH", "findings.db"),
             slack_channel_id=os.environ.get("SLACK_CHANNEL_ID", ""),
             yahoo_email=os.environ.get("YAHOO_EMAIL", ""),

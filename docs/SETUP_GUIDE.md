@@ -130,6 +130,7 @@ Settings like the mailbox label, how big an attachment may be, or the nightly ru
 | `run_dashboard.bat` | To read the results |
 | `run_scheduler.bat` | To process automatically every night (leave the window open and the PC awake) |
 | `check_setup.bat` | Any time something seems off |
+| `check_model.bat` | To test your Anthropic key and the Claude model with one fake email |
 
 You can add options after the name when running from a black window, for example `run_alerts.bat --no-attachments` (skip attachment analysis) or `run_alerts.bat --no-gmail` (Yahoo only). Full list: [docs/README.md](README.md#running).
 

@@ -60,9 +60,14 @@ The Gmail part is the only fiddly step. **[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE
 | `run_dashboard.bat` | Opens the results in your browser at <http://localhost:5000> |
 | `run_scheduler.bat` | *Optional:* checks the mailbox every night (PC must be on) |
 | `check_setup.bat` | Health check - tells you exactly what's missing or broken |
+| `check_model.bat` | Sends one fake phishing email to Claude to confirm your API key and model work (one small API request) |
 | `demo.bat` | The keyless demo |
 
 **To report a phish:** put the email in your Gmail label `phishing-reports` (or your Yahoo report folder), leave it unread, and run `run_alerts.bat`. Open the dashboard to read the verdict, Claude's reasoning, every indicator found, and the recommended action.
+
+## Which Claude model
+
+Verdicts come from the Anthropic API (Messages API) using **`claude-sonnet-5-5`** by default. To use a different model, set `CLAUDE_MODEL` in `.env`; no code changes are needed. Run `check_model.bat` after changing it.
 
 ## How attachments are analyzed
 
