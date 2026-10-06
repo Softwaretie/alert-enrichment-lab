@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alert Enrichment Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {# One attachment (or archive member) from the static attachment analysis. Recurses into members. #}
+  {% macro render_attachment(file) %}
+  <li class="attachment-item">
+    <span class="url-text">{{ file.filename }}</span>
+    {% if file.analyzed is defined and file.analyzed == false %}
+      <span class="badge badge-unknown">not analysed</span>
+      <span class="text-muted">{{ file.reason or '' }}</span>
+    {% else %}
+      {% set risk = file.static_risk or 'none' %}
+      <span class="badge badge-{{ {'high': 'malicious', 'medium': 'suspicious', 'low': 'unknown', 'none': 'likely_benign'}[risk] }}">{{ risk }} risk</span>
+      <span class="text-muted">{{ file.description }}{% if file.size is defined %} &middot; {{ file.size | filesizeformat }}{% endif %}</span>
+      {% if file.virustotal %}
+        <br><span class="text-muted">VirusTotal hash lookup:</span>
+        {% if file.virustotal.error %}
+          <span class="text-muted">error ({{ file.virustotal.error }})</span>
+        {% elif file.virustotal.skipped %}
+          <span class="text-muted">skipped ({{ file.virustotal.skipped }})</span>
+        {% elif file.virustotal.found %}
+          <strong>{{ file.virustotal.malicious }}</strong> malicious / {{ file.virustotal.suspicious }} suspicious engines{% if file.virustotal.threat_label %} &middot; {{ file.virustotal.threat_label }}{% endif %}
+        {% else %}
+          <span class="text-muted">never seen before (unknown, not proof it is safe)</span>
+        {% endif %}
+      {% endif %}
+      {% if file.sha256 %}<br><span class="sha-text">SHA-256 {{ file.sha256 }}</span>{% endif %}
+      {% if file.signals %}
+      <ul class="signal-list">
+        {% for s in file.signals %}
+        <li><span class="sev sev-{{ s.severity }}">{{ s.severity }}</span> {{ s.detail }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if file.urls %}
+      <div class="text-muted">Links inside this file: <span class="url-text">{{ file.urls[:5] | join(' , ') }}{% if file.urls | length > 5 %} (+{{ file.urls | length - 5 }} more){% endif %}</span></div>
+      {% endif %}
+      {% if file.notes %}<div class="text-muted">{{ file.notes | join(' ') }}</div>{% endif %}
+      {% if file.members %}
+      <ul>
+        {% for member in file.members %}{{ render_attachment(member) }}{% endfor %}
+      </ul>
+      {% endif %}
+    {% endif %}
+  </li>
+  {% endmacro %}
+  <header class="page-header">
+    <div>
+      <h1>Alert Enrichment Dashboard</h1>
+      <p class="subtitle">Phishing reports triaged by VirusTotal + AbuseIPDB + Claude</p>
+    </div>
+    <a class="deleted-nav-btn" href="{{ url_for('deleted_page') }}">🗑&#xFE0E; Deleted ({{ deleted_count }})</a>
+  </header>
+
+  <div id="refresh-banner" class="refresh-banner" hidden>
+    New findings are in. <a href="javascript:location.reload()">Refresh</a> to see them.
+  </div>
+
+  <section class="run-panel">
+    <div class="run-buttons">
+      <button type="button" id="run-gmail-btn" class="run-btn" onclick="startRun('gmail')">Run Gmail</button>
+      <button type="button" id="run-yahoo-btn" class="run-btn" onclick="startRun('yahoo')">Run Yahoo</button>
+      <button type="button" id="run-both-btn" class="run-btn run-btn-primary" onclick="startRun('both')">Run Both</button>
+    </div>
+    <div id="run-status" class="run-status" hidden>
+      <span id="run-status-text"></span>
+      <div id="run-errors" class="run-errors" hidden></div>
+    </div>
+  </section>
+
+  <div id="confirm-modal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <p id="confirm-modal-text"></p>
+      <div class="modal-actions">
+        <button type="button" id="confirm-modal-cancel" class="secondary-btn">Cancel</button>
+        <button type="button" id="confirm-modal-ok" class="danger-btn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <section class="stats">
+    <a class="stat-card {% if verdict == 'all' %}active{% endif %}" href="{{ url_for('index', verdict='all', source=source) }}">
+      <span class="stat-value">{{ stats.total }}</span>
+      <span class="stat-label">Total analyzed</span>
+    </a>
+    <a class="stat-card stat-malicious {% if verdict == 'malicious' %}active{% endif %}" href="{{ url_for('index', verdict='malicious', source=source) }}">
+      <span class="stat-value">{{ stats.malicious }}</span>
+      <span class="stat-label">Phishing</span>
+    </a>
+    <a class="stat-card stat-suspicious {% if verdict == 'suspicious' %}active{% endif %}" href="{{ url_for('index', verdict='suspicious', source=source) }}">
+      <span class="stat-value">{{ stats.suspicious }}</span>
+      <span class="stat-label">Suspicious</span>
+    </a>
+    <a class="stat-card stat-likely_benign {% if verdict == 'likely_benign' %}active{% endif %}" href="{{ url_for('index', verdict='likely_benign', source=source) }}">
+      <span class="stat-value">{{ stats.likely_benign }}</span>
+      <span class="stat-label">Legitimate</span>
+    </a>
+    <a class="stat-card stat-unknown {% if verdict == 'unknown' %}active{% endif %}" href="{{ url_for('index', verdict='unknown', source=source) }}">
+      <span class="stat-value">{{ stats.unknown }}</span>
+      <span class="stat-label">Unknown</span>
+    </a>
+  </section>
+
+  <form class="filters" method="get">
+    <input type="hidden" name="verdict" value="{{ verdict }}">
+    <select name="source">
+      <option value="all" {% if source == 'all' %}selected{% endif %}>All sources</option>
+      {% for s in sources %}
+        <option value="{{ s }}" {% if source == s %}selected{% endif %}>{{ s.title() }}</option>
+      {% endfor %}
+    </select>
+    <input type="text" name="q" placeholder="Search subject or sender" value="{{ search }}">
+    <button type="submit">Filter</button>
+    {% if verdict != 'all' or source != 'all' or search %}
+      <a class="clear-link" href="{{ url_for('index') }}">Clear</a>
+    {% endif %}
+    <button type="button" id="delete-selected-btn" class="danger-btn" hidden onclick="deleteSelected()"></button>
+  </form>
+
+  <section class="table-wrap">
+    {% if findings %}
+    <table>
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="select-all" onclick="toggleSelectAll(this)"></th>
+          <th>Source</th>
+          <th>From</th>
+          <th>Subject</th>
+          {% for col, label in [('verdict', 'Verdict'), ('confidence', 'Confidence'), ('processed_at', 'Processed')] %}
+          {% set is_active = (sort == col) %}
+          {% set next_dir = 'desc' if (is_active and sort_dir == 'asc') else 'asc' %}
+          <th>
+            <a class="sort-link" href="{{ url_for('index', verdict=verdict, source=source, q=search, sort=col, dir=next_dir) }}">
+              {{ label }}
+              <span class="sort-arrow {% if is_active %}active{% endif %}">{{ '▲' if (is_active and sort_dir == 'asc') else '▼' }}</span>
+            </a>
+          </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr class="finding-row" onclick="toggleDetail({{ f.id }})">
+          <td onclick="event.stopPropagation()"><input type="checkbox" class="row-checkbox" value="{{ f.id }}" onchange="updateDeleteButton()"></td>
+          <td>
+            <span class="badge source-badge source-{{ f.source }}">{{ f.source.title() }}</span>
+            {% if f.mailbox %}<div class="mailbox-text">{{ f.mailbox }}</div>{% endif %}
+          </td>
+          <td class="sender-cell">{{ f.sender }}</td>
+          <td>{{ f.subject }}</td>
+          <td><span class="badge badge-{{ f.verdict }}">{{ f.verdict.replace('_', ' ') }}</span></td>
+          <td>{{ f.confidence or "—" }}</td>
+          <td class="timestamp-cell">{{ f.processed_at }}</td>
+        </tr>
+        <tr id="detail-{{ f.id }}" class="detail-row" hidden>
+          <td colspan="7">
+            <div class="detail-panel">
+              <p><strong>Summary</strong><br>{{ f.summary or "No summary provided." }}</p>
+              {% if f.key_indicators %}
+              <p><strong>Key indicators</strong></p>
+              <ul>
+                {% for indicator in f.key_indicators %}
+                <li>{{ indicator }}</li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+              {% set scanned_urls = f.enrichment.urls.items() | selectattr('1.urlscan') | list if f.enrichment and f.enrichment.urls else [] %}
+              {% if scanned_urls %}
+              <p><strong>URL sandbox (urlscan.io)</strong></p>
+              <ul>
+                {% for url, data in scanned_urls %}
+                <li>
+                  <span class="url-text">{{ url }}</span><br>
+                  {% if data.urlscan.error %}
+                    <span class="text-muted">scan error: {{ data.urlscan.error }}</span>
+                  {% else %}
+                    <span class="badge {{ 'badge-malicious' if data.urlscan.malicious else 'badge-likely_benign' }}">
+                      {{ 'malicious' if data.urlscan.malicious else 'clean' }}
+                    </span>
+                    score {{ data.urlscan.score }}
+                    {% if data.urlscan.categories %} · {{ data.urlscan.categories | join(', ') }}{% endif %}
+                    {% if data.urlscan.report_url %} · <a href="{{ data.urlscan.report_url }}" target="_blank" rel="noopener noreferrer">report</a>{% endif %}
+                  {% endif %}
+                </li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+              {% set att = f.enrichment.attachments if f.enrichment and f.enrichment.attachments else none %}
+              {% if att and att.files %}
+              <p><strong>Attachments</strong>
+                <span class="badge badge-{{ {'high': 'malicious', 'medium': 'suspicious', 'low': 'unknown', 'none': 'likely_benign'}[att.static_risk or 'none'] }}">{{ att.static_risk or 'none' }} static risk</span></p>
+              {% for s in att.email_signals or [] %}
+              <p class="signal-note"><span class="sev sev-{{ s.severity }}">{{ s.severity }}</span> {{ s.detail }}</p>
+              {% endfor %}
+              <ul class="attachment-list">
+                {% for file in att.files %}{{ render_attachment(file) }}{% endfor %}
+              </ul>
+              <p class="text-muted">Static analysis only: files were hashed and inspected in memory, never opened, run or uploaded.</p>
+              {% endif %}
+              <p><strong>Recommended action</strong><br>{{ f.recommended_action or "—" }}</p>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No findings match this filter yet.</p>
+    {% endif %}
+  </section>
+
+  <script>
+    function toggleDetail(id) {
+      const row = document.getElementById('detail-' + id);
+      row.hidden = !row.hidden;
+    }
+
+    function toggleSelectAll(checkbox) {
+      document.querySelectorAll('.row-checkbox').forEach(cb => { cb.checked = checkbox.checked; });
+      updateDeleteButton();
+    }
+
+    function selectedIds() {
+      return Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => parseInt(cb.value, 10));
+    }
+
+    function updateDeleteButton() {
+      const count = selectedIds().length;
+      const btn = document.getElementById('delete-selected-btn');
+      btn.hidden = count === 0;
+      btn.textContent = `Delete ${count} selected`;
+      const selectAll = document.getElementById('select-all');
+      if (selectAll) {
+        const total = document.querySelectorAll('.row-checkbox').length;
+        selectAll.checked = count > 0 && count === total;
+      }
+    }
+
+    function showConfirm(message) {
+      return new Promise(resolve => {
+        const modal = document.getElementById('confirm-modal');
+        document.getElementById('confirm-modal-text').textContent = message;
+        const okBtn = document.getElementById('confirm-modal-ok');
+        const cancelBtn = document.getElementById('confirm-modal-cancel');
+
+        const cleanup = (result) => {
+          modal.hidden = true;
+          okBtn.removeEventListener('click', onOk);
+          cancelBtn.removeEventListener('click', onCancel);
+          resolve(result);
+        };
+        const onOk = () => cleanup(true);
+        const onCancel = () => cleanup(false);
+
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        modal.hidden = false;
+      });
+    }
+
+    async function deleteSelected() {
+      const ids = selectedIds();
+      if (ids.length === 0) return;
+      const ok = await showConfirm(
+        `Delete ${ids.length} finding(s)? You can restore them from the Deleted page ` +
+        `within {{ retention_days }} days, after which they're permanently removed.`
+      );
+      if (!ok) return;
+
+      const resp = await fetch('/api/findings/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if (resp.ok) location.reload();
+    }
+
+    const RUN_BUTTON_IDS = ['run-gmail-btn', 'run-yahoo-btn', 'run-both-btn'];
+    let runPollTimer = null;
+    let sawRunning = false;
+
+    function setRunButtonsDisabled(disabled) {
+      RUN_BUTTON_IDS.forEach(id => { document.getElementById(id).disabled = disabled; });
+    }
+
+    function renderRunState(state) {
+      const statusBox = document.getElementById('run-status');
+      const statusText = document.getElementById('run-status-text');
+      const errorsBox = document.getElementById('run-errors');
+
+      if (state.status === 'idle') {
+        statusBox.hidden = true;
+        setRunButtonsDisabled(false);
+        return;
+      }
+
+      statusBox.hidden = false;
+      setRunButtonsDisabled(state.status === 'running');
+
+      if (state.status === 'running') {
+        const progress = state.total ? `${state.processed} of ${state.total} email(s) processed` : 'Starting…';
+        statusText.textContent = `Processing (${state.source})… ${progress}`;
+      } else if (state.status === 'done') {
+        statusText.textContent = `Done (${state.source}): ${state.processed} of ${state.total} email(s) processed.`;
+      } else if (state.status === 'error') {
+        statusText.textContent = `Run failed (${state.source}) after ${state.processed} of ${state.total} email(s).`;
+      }
+
+      if (state.errors && state.errors.length) {
+        errorsBox.hidden = false;
+        errorsBox.innerHTML = '<strong>Errors:</strong><ul>' +
+          state.errors.map(e => `<li>${e.replace(/</g, '&lt;')}</li>`).join('') + '</ul>';
+      } else {
+        errorsBox.hidden = true;
+        errorsBox.innerHTML = '';
+      }
+    }
+
+    async function pollRunStatus() {
+      try {
+        const resp = await fetch('/api/run/status');
+        if (!resp.ok) return;
+        const state = await resp.json();
+        renderRunState(state);
+
+        if (state.status === 'running') {
+          sawRunning = true;
+          runPollTimer = setTimeout(pollRunStatus, 1500);
+        } else {
+          clearTimeout(runPollTimer);
+          if (state.status === 'done' && sawRunning) {
+            location.reload();
+          }
+        }
+      } catch (err) {
+        runPollTimer = setTimeout(pollRunStatus, 1500);
+      }
+    }
+
+    async function startRun(source) {
+      setRunButtonsDisabled(true);
+      try {
+        const resp = await fetch('/api/run/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source }),
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          alert(body.error || 'Could not start run.');
+          setRunButtonsDisabled(false);
+          return;
+        }
+        pollRunStatus();
+      } catch (err) {
+        alert('Could not start run: ' + err);
+        setRunButtonsDisabled(false);
+      }
+    }
+
+    // Pick up a run already in progress (e.g. page reloaded mid-run).
+    pollRunStatus();
+
+    const INITIAL_TOTAL = {{ stats.total }};
+    const POLL_INTERVAL_MS = 10000;
+
+    function anyDetailExpanded() {
+      return Array.from(document.querySelectorAll('.detail-row')).some(row => !row.hidden);
+    }
+
+    async function pollForNewFindings() {
+      try {
+        const resp = await fetch('/api/stats');
+        if (!resp.ok) return;
+        const stats = await resp.json();
+        if (stats.total !== INITIAL_TOTAL) {
+          if (anyDetailExpanded()) {
+            document.getElementById('refresh-banner').hidden = false;
+          } else {
+            location.reload();
+          }
+        }
+      } catch (err) {
+        // Network hiccup or server briefly down; just try again next tick.
+      }
+    }
+
+    setInterval(pollForNewFindings, POLL_INTERVAL_MS);
+  </script>
+</body>
+</html>

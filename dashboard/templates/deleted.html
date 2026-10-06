@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deleted Findings</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Deleted Findings</h1>
+    <p class="subtitle">
+      <a class="deleted-link" href="{{ url_for('index') }}">&larr; Back to dashboard</a>
+      &middot; Permanently removed after {{ retention_days }} days
+    </p>
+  </header>
+
+  <div class="filters">
+    <button type="button" id="restore-selected-btn" hidden onclick="restoreSelected()"></button>
+  </div>
+
+  <section class="table-wrap">
+    {% if findings %}
+    <table>
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="select-all" onclick="toggleSelectAll(this)"></th>
+          <th>Source</th>
+          <th>From</th>
+          <th>Subject</th>
+          <th>Verdict</th>
+          <th>Deleted</th>
+          <th>Purges in</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr>
+          <td><input type="checkbox" class="row-checkbox" value="{{ f.id }}" onchange="updateRestoreButton()"></td>
+          <td>
+            <span class="badge source-badge source-{{ f.source }}">{{ f.source.title() }}</span>
+            {% if f.mailbox %}<div class="mailbox-text">{{ f.mailbox }}</div>{% endif %}
+          </td>
+          <td class="sender-cell">{{ f.sender }}</td>
+          <td>{{ f.subject }}</td>
+          <td><span class="badge badge-{{ f.verdict }}">{{ f.verdict.replace('_', ' ') }}</span></td>
+          <td class="timestamp-cell">{{ f.deleted_at }}</td>
+          <td class="timestamp-cell">{{ f.days_until_purge }} day(s)</td>
+          <td><button type="button" class="restore-btn" onclick="restoreIds([{{ f.id }}])">Restore</button></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">Nothing in the trash.</p>
+    {% endif %}
+  </section>
+
+  <script>
+    function toggleSelectAll(checkbox) {
+      document.querySelectorAll('.row-checkbox').forEach(cb => { cb.checked = checkbox.checked; });
+      updateRestoreButton();
+    }
+
+    function selectedIds() {
+      return Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => parseInt(cb.value, 10));
+    }
+
+    function updateRestoreButton() {
+      const count = selectedIds().length;
+      const btn = document.getElementById('restore-selected-btn');
+      btn.hidden = count === 0;
+      btn.textContent = `Restore ${count} selected`;
+    }
+
+    function restoreSelected() {
+      restoreIds(selectedIds());
+    }
+
+    async function restoreIds(ids) {
+      if (ids.length === 0) return;
+      const resp = await fetch('/api/findings/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if (resp.ok) location.reload();
+    }
+  </script>
+</body>
+</html>

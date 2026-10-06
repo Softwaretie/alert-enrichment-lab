@@ -1,0 +1,17 @@
+.env
+credentials.json
+client_secret_*.json
+token.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/*.json
+logs/*.log
+!logs/.gitkeep
+findings.db
+findings.db-journal
+findings.db-wal
+findings.db-shm
+.vscode/
+*.zip
