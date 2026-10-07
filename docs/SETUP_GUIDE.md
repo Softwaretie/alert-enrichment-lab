@@ -28,7 +28,7 @@ The project needs **Python 3.10 or newer**.
 ## 2. Get the project
 
 1. On the project's GitHub page click the green **Code** button, then **Download ZIP**.
-2. Find the ZIP in your Downloads, right-click it, choose **Extract All...**, and extract to somewhere simple like `C:\Projects\alert-enrichment`. (Don't run files from inside the ZIP window - it won't work.)
+2. Find the ZIP in your Downloads, right-click it, choose **Extract All...**, and extract to somewhere simple like your Documents folder (for example `Documents\alert-enrichment-lab`). (Don't run files from inside the ZIP window - it won't work.)
 3. Open the extracted folder. You should see `setup.bat`, `demo.bat`, `README.md` and others.
 
 **Windows warns "Windows protected your PC"** when you double-click a `.bat` file? That's SmartScreen being cautious about downloaded files. Click **More info -> Run anyway**. You can open any `.bat` file in Notepad first (right-click -> Edit) - they are short and readable.
