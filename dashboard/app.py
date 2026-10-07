@@ -12,12 +12,21 @@ sys.path.insert(0, PROJECT_ROOT)
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
 
-from src import database
+from src import database, mail_actions
 
 load_dotenv()
 
 DB_PATH = os.environ.get("FINDINGS_DB_PATH", database.DB_PATH)
 RETENTION_DAYS = int(os.environ.get("DELETED_RETENTION_DAYS", str(database.DEFAULT_RETENTION_DAYS)))
+
+GMAIL_QUERY = os.environ.get("GMAIL_QUERY", "label:phishing-reports is:unread")
+
+
+def _gmail_label(query: str) -> str:
+    """The label name out of GMAIL_QUERY, for the dashboard's Gmail hint."""
+    match = re.search(r"label:(\"[^\"]+\"|\S+)", query or "")
+    return match.group(1).strip('"') if match else "phishing-reports"
+
 
 app = Flask(__name__)
 
@@ -39,6 +48,11 @@ _run_state = {
 _FOUND_RE = re.compile(r"(?:Gmail|Yahoo): found (\d+) message")
 _PROCESSING_RE = re.compile(r"\[(?:gmail|yahoo) (\d+)/(\d+)\] Processing")
 _FAILED_RE = re.compile(r"\[(?:gmail|yahoo) \d+/\d+\] Failed to process message (\S+): (.+)")
+# Whole-mailbox failures (sign-in, connection, folder) -- otherwise the dashboard only
+# says "exited with code 1" and the reason is lost.
+_MAILBOX_FAILED_RE = re.compile(r"(Gmail|Yahoo) could not be checked: (.+)")
+# Full output of the most recent run, for troubleshooting.
+RUN_LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "last_run.log")
 
 _SOURCE_ARGS = {
     "gmail": ["--no-yahoo"],
@@ -60,11 +74,18 @@ def _run_pipeline(source: str) -> None:
             cmd, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
+        os.makedirs(os.path.dirname(RUN_LOG_PATH), exist_ok=True)
+        run_log = open(RUN_LOG_PATH, "w", encoding="utf-8")
         for line in proc.stdout:
+            run_log.write(line)
+            run_log.flush()
             found = _FOUND_RE.search(line)
             processing = _PROCESSING_RE.search(line)
             failed = _FAILED_RE.search(line)
+            mailbox_failed = _MAILBOX_FAILED_RE.search(line)
             with _run_lock:
+                if mailbox_failed:
+                    _run_state["errors"].append(f"{mailbox_failed.group(1)}: {mailbox_failed.group(2).strip()}")
                 if found:
                     _run_state["total"] += int(found.group(1))
                 if processing:
@@ -72,6 +93,7 @@ def _run_pipeline(source: str) -> None:
                 if failed:
                     _run_state["errors"].append(f"{failed.group(1)}: {failed.group(2)}")
         proc.wait()
+        run_log.close()
         with _run_lock:
             _run_state["status"] = "done" if proc.returncode == 0 else "error"
             if proc.returncode != 0 and not _run_state["errors"]:
@@ -116,8 +138,19 @@ def index():
             sort=sort, sort_dir=sort_dir,
         )
         deleted_count = database.count_deleted(conn)
+        actions_by_id = database.list_mail_actions(conn, [f["id"] for f in findings])
+        blocked = {b["address"] for b in database.list_blocked_senders(conn)}
     finally:
         conn.close()
+
+    for f in findings:
+        f["sender_address"] = mail_actions.sender_address(f["sender"])
+        f["sender_blocked"] = f["sender_address"] in blocked
+        f["suggested_action"] = mail_actions.decide_action(f["verdict"], f.get("category"))
+        f["mail_history"] = actions_by_id.get(f["id"], [])
+        # Yahoo findings from before mail actions existed only stored a sequence
+        # number, which can point at a different email now, so they can't be acted on.
+        f["actionable"] = not (f["source"] == "yahoo" and not f.get("message_id") and not f.get("uidvalidity"))
 
     return render_template(
         "index.html",
@@ -130,6 +163,9 @@ def index():
         sort=sort,
         sort_dir=sort_dir,
         deleted_count=deleted_count,
+        blocked_count=len(blocked),
+        gmail_query=GMAIL_QUERY,
+        gmail_label=_gmail_label(GMAIL_QUERY),
         retention_days=RETENTION_DAYS,
     )
 
@@ -194,6 +230,117 @@ def api_restore_findings():
     finally:
         conn.close()
     return jsonify({"restored": count})
+
+
+# --- Mail actions (spam folder / Trash / block sender) ---------------------
+
+_MAIL_ACTIONS = {"spam", "trash", "block", "restore"}
+_mail_lock = threading.Lock()  # one mailbox change at a time
+
+
+@app.route("/api/findings/<int:finding_id>/mail-action", methods=["POST"])
+def api_mail_action(finding_id):
+    payload = request.get_json(silent=True) or {}
+    action = payload.get("action")
+    if action not in _MAIL_ACTIONS:
+        abort(400)
+
+    with _mail_lock:
+        conn = get_db()
+        actor = mail_actions.dashboard_actor(conn, PROJECT_ROOT)
+        try:
+            finding = database.get_finding(conn, finding_id)
+            if not finding:
+                abort(404)
+            if finding["source"] == "yahoo" and not finding.get("message_id") and not finding.get("uidvalidity"):
+                return jsonify({"ok": False, "message": "This Yahoo email was analysed before mail actions existed, "
+                                "so it can't be found reliably. Act on it in Yahoo Mail directly."}), 409
+            if action == "spam":
+                result = actor.move_to_spam(finding)
+            elif action == "trash":
+                result = actor.move_to_trash(finding)
+            elif action == "restore":
+                result = actor.restore(finding)
+            else:
+                result = actor.block_sender(finding, force=bool(payload.get("force")))
+        finally:
+            actor.close()
+            conn.close()
+    return jsonify(result), (200 if result.get("ok") or result.get("needs_confirm") else 502)
+
+
+_BULK_ACTIONS = {"spam", "trash", "block", "block_and_trash", "restore"}
+
+
+@app.route("/api/findings/bulk-mail-action", methods=["POST"])
+def api_bulk_mail_action():
+    """Apply one mailbox action to many findings, sharing one Gmail/Yahoo connection.
+    Each email is handled independently: one failure never stops the rest."""
+    payload = request.get_json(silent=True) or {}
+    action = payload.get("action")
+    if action not in _BULK_ACTIONS:
+        abort(400)
+    ids = _parse_ids(payload)
+
+    results = []
+    with _mail_lock:
+        conn = get_db()
+        actor = mail_actions.dashboard_actor(conn, PROJECT_ROOT)
+        try:
+            for finding_id in ids:
+                finding = database.get_finding(conn, finding_id)
+                if not finding:
+                    results.append({"id": finding_id, "ok": False, "message": "finding not found"})
+                    continue
+                if finding["source"] == "yahoo" and not finding.get("message_id") and not finding.get("uidvalidity"):
+                    results.append({"id": finding_id, "ok": False,
+                                    "message": "older Yahoo email, act on it in Yahoo Mail"})
+                    continue
+                if action == "spam":
+                    steps = [actor.move_to_spam(finding)]
+                elif action == "trash":
+                    steps = [actor.move_to_trash(finding)]
+                elif action == "restore":
+                    steps = [actor.restore(finding)]
+                elif action == "block":
+                    steps = [actor.block_sender(finding)]
+                else:
+                    steps = [actor.move_to_trash(finding), actor.block_sender(finding)]
+                failed = [s for s in steps if not s.get("ok")]
+                results.append({"id": finding_id, "ok": not failed,
+                                "message": "; ".join(s["message"] for s in (failed or steps))})
+        finally:
+            actor.close()
+            conn.close()
+
+    done = sum(1 for r in results if r["ok"])
+    return jsonify({"ok": done, "failed": len(results) - done, "results": results})
+
+
+@app.route("/blocked")
+def blocked_page():
+    conn = get_db()
+    try:
+        senders = database.list_blocked_senders(conn)
+    finally:
+        conn.close()
+    return render_template("blocked.html", senders=senders)
+
+
+@app.route("/api/blocked/unblock", methods=["POST"])
+def api_unblock():
+    address = ((request.get_json(silent=True) or {}).get("address") or "").strip()
+    if not address:
+        abort(400)
+    with _mail_lock:
+        conn = get_db()
+        actor = mail_actions.dashboard_actor(conn, PROJECT_ROOT)
+        try:
+            result = actor.unblock(address)
+        finally:
+            actor.close()
+            conn.close()
+    return jsonify(result), (200 if result.get("ok") else 502)
 
 
 @app.route("/api/run/start", methods=["POST"])

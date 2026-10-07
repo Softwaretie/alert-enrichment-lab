@@ -65,6 +65,10 @@ The Gmail part is the only fiddly step. **[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE
 
 **To report a phish:** put the email in your Gmail label `phishing-reports` (or your Yahoo report folder), leave it unread, and run `run_alerts.bat`. Open the dashboard to read the verdict, Claude's reasoning, every indicator found, and the recommended action.
 
+## Acting on the verdicts
+
+Claude also says what *kind* of email it is (phishing, malware, scam, spam, legitimate). From the dashboard you can **mark as spam**, **delete** (move to Trash, with Undo) or **block the sender**, one row at a time or several at once with *Select all* and the bulk-action bar. High-confidence verdicts are acted on automatically: spam goes to the spam folder; phishing / malware / scam is trashed and the sender blocked (turn this off with `AUTO_MAIL_ACTIONS=0` in `.env`). Gmail blocks are real Gmail filters; Yahoo doesn't let apps edit its block list, so the tool trashes blocked senders' new mail each run. Senders whose address looks forged, your own address, and anything in `NEVER_BLOCK` are never blocked automatically. Details: [docs/README.md](docs/README.md#mailbox-actions-spam-folder-trash-block-sender).
+
 ## Which Claude model
 
 Verdicts come from the Anthropic API (Messages API) using **`claude-sonnet-5-5`** by default. To use a different model, set `CLAUDE_MODEL` in `.env`; no code changes are needed. Run `check_model.bat` after changing it.
@@ -96,7 +100,7 @@ main.py                  the analysis run (what run_alerts.bat starts)
 src/                     the pipeline: mail clients, IOC extraction, enrichment, Claude
 src/attachments/         attachment analyzer (Python standard library only)
 dashboard/               the local results website
-scripts/                 setup wizard, nightly scheduler, health check, demo
+scripts/                 setup wizard, nightly scheduler, health check, demo, Gmail/Yahoo checks
 tests/                   automated tests (harmless synthetic samples only)
 docs/SETUP_GUIDE.md      step-by-step setup for beginners
 docs/README.md           technical reference: options, architecture, limits

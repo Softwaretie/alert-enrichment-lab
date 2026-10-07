@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocked Senders</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Blocked Senders</h1>
+    <p class="subtitle">
+      <a class="deleted-link" href="{{ url_for('index') }}">&larr; Back to dashboard</a>
+      &middot; New mail from these addresses is moved to Trash
+    </p>
+  </header>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <p class="page-note">
+    <strong>Gmail</strong> blocks are real Gmail filters (visible under Settings &rsaquo; Filters and Blocked
+    Addresses), so they work even when this app is closed.
+    <strong>Yahoo</strong> has no way for apps to edit its block list, so those senders are blocked by this app:
+    their new mail is trashed each time the analyzer runs.
+  </p>
+
+  <section class="table-wrap">
+    {% if senders %}
+    <table>
+      <thead>
+        <tr>
+          <th>Sender</th>
+          <th>Blocked from</th>
+          <th>How</th>
+          <th>Blocked on</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in senders %}
+        <tr>
+          <td class="url-text">{{ b.address }}</td>
+          <td>
+            {% if b.source %}<span class="badge source-badge source-{{ b.source }}">{{ b.source.title() }}</span>{% endif %}
+            {% if b.mailbox %}<div class="mailbox-text">{{ b.mailbox }}</div>{% endif %}
+          </td>
+          <td>{{ 'Gmail filter + this app' if b.gmail_filter_id else 'This app (every run)' }}
+            {% if b.reason == 'auto' %}<div class="small-note">blocked automatically</div>{% endif %}
+            {% if b.reason == 'forced' %}<div class="small-note">blocked despite a forged-sender warning</div>{% endif %}
+          </td>
+          <td class="timestamp-cell">{{ b.created_at[:19].replace('T', ' ') }} UTC</td>
+          <td><button type="button" class="restore-btn" data-address="{{ b.address }}" onclick="unblock(this)">Unblock</button></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No blocked senders.</p>
+    {% endif %}
+  </section>
+
+  <script>
+    async function unblock(btn) {
+      btn.disabled = true;
+      btn.textContent = 'Working…';
+      const toast = document.getElementById('toast');
+      try {
+        const resp = await fetch('/api/blocked/unblock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: btn.dataset.address }),
+        });
+        const body = await resp.json().catch(() => ({ ok: false, message: `Server error (${resp.status})` }));
+        toast.textContent = body.message;
+        toast.classList.toggle('toast-error', !body.ok);
+        toast.hidden = false;
+        if (body.ok) { setTimeout(() => location.reload(), 700); return; }
+      } catch (err) {
+        toast.textContent = 'Could not reach the dashboard server: ' + err;
+        toast.classList.add('toast-error');
+        toast.hidden = false;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Unblock';
+    }
+  </script>
+</body>
+</html>

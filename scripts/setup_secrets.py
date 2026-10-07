@@ -7,6 +7,8 @@ get it before asking you to paste it in, so you don't need to cross-
 reference the README to get started.
 
     python scripts/setup_secrets.py
+    python scripts/setup_secrets.py --claude-key   (only replace the Claude API key,
+                                                    with visible typing, and test it)
 
 Secrets are stored in your OS credential store (Windows Credential Manager /
 macOS Keychain / Linux Secret Service) via `keyring`, not as plaintext in a
@@ -40,15 +42,33 @@ def _ensure_env_file() -> None:
     load_dotenv(_ENV_PATH)
 
 
+_VISIBLE = "--visible" in sys.argv
+
+
+def _clean(value: str) -> str:
+    # Ctrl+V in the classic Windows console can arrive as a literal ^V character
+    # instead of pasting; strip control characters so a stray one can't corrupt a key.
+    return "".join(ch for ch in value if ch.isprintable()).strip()
+
+
+def _mask(value: str) -> str:
+    return f"{value[:7]}...{value[-4:]}, {len(value)} characters" if len(value) > 12 else f"{len(value)} characters"
+
+
 def _prompt_secret(prompt: str) -> str:
     """Hidden input via getpass, falling back to plain (visible) input if
     the terminal doesn't support hidden entry -- a crash here is a much
     worse first-run experience than an unmasked keystroke or two."""
+    if _VISIBLE:
+        return _clean(input(f"{prompt}: "))
+    print("  (Typing is hidden: nothing appears while you paste, that's normal. Paste with a\n"
+          "   RIGHT-CLICK in the window (Ctrl+V doesn't work in every console), then press Enter.\n"
+          "   Prefer to see it? Re-run with --visible.)")
     try:
-        return getpass.getpass(f"{prompt}: ").strip()
+        return _clean(getpass.getpass(f"{prompt}: "))
     except Exception:
         print("  (hidden input isn't available in this terminal -- your typing will be visible)")
-        return input(f"{prompt}: ").strip()
+        return _clean(input(f"{prompt}: "))
 
 
 def _prompt_plain(prompt: str, default: str = "") -> str:
@@ -102,7 +122,7 @@ def _setup_key(env_name: str, label: str, why: str, url: str, required: bool) ->
         print(f"  Skipped -- {note}.")
         return
     _store_secret(env_name, value)
-    print("  Stored.")
+    print(f"  Stored ({_mask(value)}).")
 
 
 def setup_gmail() -> None:
@@ -197,7 +217,38 @@ def setup_urlscan() -> None:
         "https://urlscan.io/user/signup", required=False,
     )
 
+def check_claude_key(key: str) -> bool:
+    """Ask Anthropic whether the key works (lists models: free, no tokens used)."""
+    try:
+        import anthropic
+        anthropic.Anthropic(api_key=key).models.list(limit=1)
+        print("  Checked with Anthropic: the key works.")
+        return True
+    except Exception as exc:  # noqa: BLE001 - report whatever went wrong
+        print(f"  Anthropic rejected this key: {exc}")
+        print("  Copy it again from https://console.anthropic.com/settings/keys (a new key is shown only once).")
+        return False
 
+
+def setup_claude_key_only() -> None:
+    print("Replace the Anthropic (Claude) API key. What you paste WILL be visible on screen.")
+    print("Paste with a right-click (or Ctrl+V in Windows Terminal), then press Enter. Enter alone cancels.")
+    value = _clean(input("  Claude API key: "))
+    if not value:
+        print("  Cancelled; nothing changed.")
+        return
+    if not value.startswith("sk-ant-"):
+        print("  Note: Claude API keys normally start with 'sk-ant-'. Double-check you copied the whole key.")
+    if check_claude_key(value) or _ask_yes_no("  Save it anyway?"):
+        _store_secret("ANTHROPIC_API_KEY", value)
+        print(f"  Stored in Windows Credential Manager ({_mask(value)}).")
+        print("  Tip: run  cls  to clear the key off the screen.")
+
+
+
+    if "--claude-key" in sys.argv:
+        setup_claude_key_only()
+        return
 def main():
     _ensure_env_file()
     setup_gmail()

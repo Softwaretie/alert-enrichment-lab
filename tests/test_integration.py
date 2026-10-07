@@ -277,7 +277,8 @@ class MailboxIsolationTests(unittest.TestCase):
     def test_gmail_sign_in_failure_still_checks_yahoo(self):
         config = mock.Mock(virustotal_api_key="v", abuseipdb_api_key="a", anthropic_api_key="k",
                            claude_model="m", urlscan_configured=False, findings_db_path=":memory:",
-                           max_attachment_bytes=0, yahoo_configured=True)
+                           max_attachment_bytes=0, yahoo_configured=True,
+                           never_block=(), yahoo_email="", auto_mail_actions=True)
         with mock.patch.object(pipeline, "VirusTotalClient"), mock.patch.object(pipeline, "AbuseIPDBClient"), \
              mock.patch.object(pipeline, "ClaudeAnalyzer"), \
              mock.patch.object(pipeline, "_run_gmail", side_effect=RuntimeError("invalid_grant")), \

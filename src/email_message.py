@@ -17,3 +17,9 @@ class EmailMessage:
     # Downloaded attachment bytes (src.attachments.RawAttachment), held in memory only
     # while the email is being analysed; the pipeline clears this once a report exists.
     attachments: list = field(default_factory=list)
+    # Where the message lives, so the dashboard can act on it (spam/trash) later.
+    # message_id is the RFC 5322 Message-ID header -- stable across folder moves,
+    # used to find Yahoo messages again. folder/uidvalidity are Yahoo IMAP details.
+    message_id: str = ""
+    folder: str = ""
+    uidvalidity: str = ""

@@ -56,6 +56,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def never_block_list() -> tuple:
+    """NEVER_BLOCK in .env: comma-separated addresses (boss@company.com) or domains
+    (company.com) that "block sender" must never touch, even if Claude flags them."""
+    raw = os.environ.get("NEVER_BLOCK", "")
+    return tuple(item.strip().lower().lstrip("@") for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Config:
     anthropic_api_key: str
@@ -75,6 +82,10 @@ class Config:
     urlscan_api_key: str
     attachment_analysis: bool = True
     attachment_max_mb: int = 25
+    # Mail actions: act on high-confidence verdicts automatically (spam folder /
+    # Trash + block sender). The dashboard buttons work either way.
+    auto_mail_actions: bool = True
+    never_block: tuple = ()
 
     @property
     def yahoo_configured(self) -> bool:
@@ -101,6 +112,8 @@ class Config:
             urlscan_api_key=_get_secret("URLSCAN_API_KEY"),
             attachment_analysis=_env_flag("ATTACHMENT_ANALYSIS", True),
             attachment_max_mb=_env_int("ATTACHMENT_MAX_MB", 25),
+            auto_mail_actions=_env_flag("AUTO_MAIL_ACTIONS", True),
+            never_block=never_block_list(),
             # Plain config: not sensitive, fine to keep in .env.
             gmail_query=os.environ.get("GMAIL_QUERY", "label:phishing-reports is:unread"),
             gmail_credentials_path=os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json"),

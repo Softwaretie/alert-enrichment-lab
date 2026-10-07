@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from src import attachments, database, gmail_client, ioc_extractor
+from src.mail_actions import MailActor
 from src.claude_analyzer import ClaudeAnalyzer
 from src.config import Config
 from src.email_message import EmailMessage
@@ -38,9 +39,11 @@ def _write_result(email: EmailMessage, result: dict) -> str:
 
 
 def _process_email(email: EmailMessage, vt: VirusTotalClient, abuseipdb: AbuseIPDBClient,
-                    analyzer: ClaudeAnalyzer, db_conn, notifier, urlscan: UrlscanClient = None) -> str:
+                    analyzer: ClaudeAnalyzer, db_conn, notifier, urlscan: UrlscanClient = None,
+                    mail_actor: MailActor = None) -> str:
     """Run one email through IOC extraction -> enrichment -> Claude -> persistence
-    -> Slack. Shared by every mail source so Gmail and Yahoo get identical treatment."""
+    -> Slack -> mail actions. Shared by every mail source so Gmail and Yahoo get
+    identical treatment."""
     iocs = ioc_extractor.extract(email.body_text, email.sender)
 
     # Attachments: hash + static analysis of the downloaded bytes (in memory only).
@@ -83,10 +86,13 @@ def _process_email(email: EmailMessage, vt: VirusTotalClient, abuseipdb: AbuseIP
         "enrichment": enrichment_results,
         "claude_analysis": analysis,
         "processed_at": datetime.now(timezone.utc).isoformat(),
+        "message_id": email.message_id,
+        "mail_folder": email.folder,
+        "uidvalidity": email.uidvalidity,
     }
 
     path = _write_result(email, finding)
-    database.insert_finding(db_conn, finding)
+    finding_id = database.insert_finding(db_conn, finding)
     logger.info(
         "[%s] Wrote result to %s (verdict=%s)", email.source, path, analysis.get("verdict")
     )
@@ -94,12 +100,54 @@ def _process_email(email: EmailMessage, vt: VirusTotalClient, abuseipdb: AbuseIP
     if notifier:
         notifier.notify(email, analysis)
 
+    # High-confidence spam -> spam folder; phishing/malicious -> Trash + block sender.
+    # A failed action is logged on the dashboard; it never fails the email.
+    if mail_actor is not None:
+        mail_actor.auto_act(database.get_finding(db_conn, finding_id))
+
     return path
 
 
+def _handle_blocked_sender(email: EmailMessage, db_conn, mail_actor: MailActor) -> str:
+    """Mail from a sender you blocked: trash it without spending Claude/VirusTotal calls,
+    and record it so it still shows on the dashboard (with Undo)."""
+    finding = {
+        "source": email.source,
+        "mailbox": email.mailbox,
+        "email_id": email.id,
+        "thread_id": email.thread_id,
+        "subject": email.subject,
+        "sender": email.sender,
+        "date": email.date,
+        "attachment_names": email.attachment_names,
+        "extracted_iocs": {},
+        "enrichment": {"sender_authentication": email.auth_results},
+        "claude_analysis": {
+            "verdict": "malicious",
+            "category": "blocked_sender",
+            "confidence": "high",
+            "summary": "This sender is on your block list, so the email was moved to Trash without being analysed.",
+            "key_indicators": ["Sender previously blocked"],
+            "recommended_action": "None needed. If this was a mistake, Undo it here and unblock the sender on the Blocked page.",
+        },
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "message_id": email.message_id,
+        "mail_folder": email.folder,
+        "uidvalidity": email.uidvalidity,
+    }
+    path = _write_result(email, finding)
+    finding_id = database.insert_finding(db_conn, finding)
+    mail_actor.move_to_trash(database.get_finding(db_conn, finding_id), trigger="blocklist")
+    logger.info("[%s] %s is from blocked sender %r; moved to Trash without analysis.",
+                email.source, email.id, email.sender)
+    return path
+
 def _run_gmail(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlscan,
-                max_results: int, mark_read: bool, result: RunResult, attachment_bytes: int = 0) -> None:
+                max_results: int, mark_read: bool, result: RunResult, attachment_bytes: int = 0,
+                mail_actor: MailActor = None) -> None:
     service = gmail_client.authenticate(config.gmail_credentials_path, config.gmail_token_path)
+    if mail_actor is not None:
+        mail_actor.set_gmail(service)
     mailbox = gmail_client.get_profile_email(service)
     message_ids = gmail_client.list_message_ids(service, config.gmail_query, max_results)
     total = len(message_ids)
@@ -112,7 +160,10 @@ def _run_gmail(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlsc
                                              max_attachment_bytes=attachment_bytes)
             logger.info("[gmail %d/%d] Processing %s: %r from %r", i, total, email.id, email.subject, email.sender)
 
-            path = _process_email(email, vt, abuseipdb, analyzer, db_conn, notifier, urlscan)
+            if mail_actor is not None and mail_actor.is_blocked(email.sender):
+                path = _handle_blocked_sender(email, db_conn, mail_actor)
+            else:
+                path = _process_email(email, vt, abuseipdb, analyzer, db_conn, notifier, urlscan, mail_actor)
             result.written_paths.append(path)
 
             if mark_read:
@@ -125,11 +176,14 @@ def _run_gmail(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlsc
 
 
 def _run_yahoo(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlscan,
-                max_results: int, mark_read: bool, result: RunResult, attachment_bytes: int = 0) -> None:
+                max_results: int, mark_read: bool, result: RunResult, attachment_bytes: int = 0,
+                mail_actor: MailActor = None) -> None:
     listener = YahooListener(
         config.yahoo_email, config.yahoo_app_password,
         folder=config.yahoo_folder, search_criteria=config.yahoo_search_criteria,
     )
+    if mail_actor is not None:
+        mail_actor.set_yahoo(listener)
     try:
         message_ids = listener.list_message_ids(max_results)
         total = len(message_ids)
@@ -142,7 +196,10 @@ def _run_yahoo(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlsc
                 email = listener.get_message(message_id, max_attachment_bytes=attachment_bytes)
                 logger.info("[yahoo %d/%d] Processing %s: %r from %r", i, total, email.id, email.subject, email.sender)
 
-                path = _process_email(email, vt, abuseipdb, analyzer, db_conn, notifier, urlscan)
+                if mail_actor is not None and mail_actor.is_blocked(email.sender):
+                    path = _handle_blocked_sender(email, db_conn, mail_actor)
+                else:
+                    path = _process_email(email, vt, abuseipdb, analyzer, db_conn, notifier, urlscan, mail_actor)
                 result.written_paths.append(path)
 
                 if mark_read:
@@ -157,7 +214,8 @@ def _run_yahoo(config: Config, vt, abuseipdb, analyzer, db_conn, notifier, urlsc
 
 
 def run(config: Config, max_results: int = 25, mark_read: bool = True, notifier=None,
-        use_yahoo: bool = None, use_gmail: bool = True, use_attachments: bool = None) -> RunResult:
+        use_yahoo: bool = None, use_gmail: bool = True, use_attachments: bool = None,
+        auto_actions: bool = None) -> RunResult:
     """Fetch matching emails from Gmail (if enabled) and Yahoo (if configured/enabled)
     and triage them one at a time through the same pipeline.
 
@@ -180,6 +238,10 @@ def run(config: Config, max_results: int = 25, mark_read: bool = True, notifier=
     use_attachments controls attachment analysis (download into memory, hash,
     static checks): None (default) follows ATTACHMENT_ANALYSIS in .env (on unless
     set to 0); True/False force it on/off for this run.
+
+    auto_actions controls acting on high-confidence verdicts (spam folder, or
+    Trash + block sender): None (default) follows AUTO_MAIL_ACTIONS in .env (on
+    unless set to 0). Mail from already-blocked senders is trashed either way.
     """
     vt = VirusTotalClient(config.virustotal_api_key)
     abuseipdb = AbuseIPDBClient(config.abuseipdb_api_key)
@@ -187,6 +249,13 @@ def run(config: Config, max_results: int = 25, mark_read: bool = True, notifier=
     urlscan = UrlscanClient(config.urlscan_api_key) if config.urlscan_configured else None
     db_conn = database.connect(config.findings_db_path)
     database.purge_expired(db_conn)  # opportunistic cleanup of anything trashed 7+ days ago
+    mail_actor = MailActor(
+        db_conn,
+        never_block=config.never_block + ((config.yahoo_email.lower(),) if config.yahoo_email else ()),
+        auto_enabled=config.auto_mail_actions if auto_actions is None else auto_actions,
+    )
+    logger.info("Automatic mail actions %s (high-confidence verdicts only).",
+                "on" if mail_actor.auto_enabled else "off")
 
     if use_attachments is None:
         attachment_bytes = config.max_attachment_bytes
@@ -201,7 +270,7 @@ def run(config: Config, max_results: int = 25, mark_read: bool = True, notifier=
         if use_gmail:
             try:
                 _run_gmail(config, vt, abuseipdb, analyzer, db_conn, notifier, urlscan, max_results, mark_read,
-                           result, attachment_bytes)
+                           result, attachment_bytes, mail_actor=mail_actor)
             except Exception as exc:  # sign-in / connection problems: report it and still try Yahoo
                 logger.exception("Gmail could not be checked: %s", exc)
                 result.failures.append({"source": "gmail", "message_id": "(mailbox)", "error": str(exc)})
@@ -223,7 +292,7 @@ def run(config: Config, max_results: int = 25, mark_read: bool = True, notifier=
         if yahoo_enabled:
             try:
                 _run_yahoo(config, vt, abuseipdb, analyzer, db_conn, notifier, urlscan, max_results, mark_read,
-                           result, attachment_bytes)
+                           result, attachment_bytes, mail_actor=mail_actor)
             except Exception as exc:  # login / connection problems: report it instead of crashing the run
                 logger.exception("Yahoo could not be checked: %s", exc)
                 result.failures.append({"source": "yahoo", "message_id": "(mailbox)", "error": str(exc)})

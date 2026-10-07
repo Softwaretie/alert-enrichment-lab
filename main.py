@@ -53,6 +53,13 @@ def main():
         help="Skip attachment analysis for this run (by default attachments are downloaded into "
         "memory, hashed and statically checked; set ATTACHMENT_ANALYSIS=0 in .env to turn it off permanently)",
     )
+    parser.add_argument(
+        "--no-auto-actions",
+        action="store_true",
+        help="Don't act on verdicts for this run (by default high-confidence spam goes to the spam "
+        "folder and phishing/malicious mail is trashed and its sender blocked; set AUTO_MAIL_ACTIONS=0 "
+        "in .env to turn that off permanently). Mail from already-blocked senders is still trashed.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -87,6 +94,7 @@ def main():
         use_yahoo=args.yahoo,
         use_gmail=not args.no_gmail,
         use_attachments=False if args.no_attachments else None,
+        auto_actions=False if args.no_auto_actions else None,
     )
 
     print(

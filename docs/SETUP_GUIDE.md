@@ -132,6 +132,8 @@ Settings like the mailbox label, how big an attachment may be, or the nightly ru
 | `check_setup.bat` | Any time something seems off |
 | `check_model.bat` | To test your Anthropic key and the Claude model with one fake email |
 
+On the dashboard, tick emails (or **Select all**), choose **Mark as spam**, **Delete**, **Block sender** or **Undo** in the bar above the table, and click **Apply**. Each row also has its own buttons. Deleted emails go to the mailbox's Trash and can be put back with Undo.
+
 You can add options after the name when running from a black window, for example `run_alerts.bat --no-attachments` (skip attachment analysis) or `run_alerts.bat --no-gmail` (Yahoo only). Full list: [docs/README.md](README.md#running).
 
 ---
@@ -148,7 +150,10 @@ First step, always: **double-click `check_setup.bat`**. It names the problem and
 | `credentials.json not found` | Finish [step 4c](#4c-create-the-key-file); the file must be named exactly `credentials.json` and sit next to `setup.bat`. Windows may hide `.json` - check it isn't `credentials.json.json` (File Explorer -> View -> Show -> File name extensions). |
 | Google says **"Access blocked"** / `access_denied` / error 403 | Add your Gmail address under **Google Auth platform -> Audience -> Test users** ([step 4b](#4b-set-up-the-consent-screen)), then run again. |
 | `invalid_grant` / "Token has been expired or revoked" | The 7-day sign-in expired. The tool opens your browser to sign in again automatically; if no browser appears, delete `token.json` and run `run_alerts.bat` again. |
-| `Processed 0/0 alert(s)` | Nothing to do: no **unread** email carries the `phishing-reports` label. Add one and retry. |
+| `Processed 0/0 alert(s)` | Nothing to do: no **unread** email carries the `phishing-reports` label. Opening an email in Gmail marks it read - mark it unread again. Emails in Gmail's Spam/Trash are skipped too. `.venv\Scripts\python.exe scripts\check_gmail.py` shows exactly why (it changes nothing). |
+| Browser asks to sign in to Google again after updating | Expected once: "Block sender" needs a new Gmail permission (manage filters). Approve it. |
+| Dashboard says it moved an email to Spam but it's back in your Yahoo report folder | A rule (Make.com, Zapier, a Yahoo filter) is moving Spam into that folder. Limit the rule to unread mail. |
+| Typing or pasting a key in `setup.bat` shows nothing | Normal - keys are hidden. Paste with a right-click and press Enter. To see what you paste, run `.venv\Scripts\python.exe scripts\setup_secrets.py --visible` (or `--claude-key` to replace and test just the Anthropic key). |
 | Many emails take ages | VirusTotal's free tier allows ~4 lookups/min; the tool waits automatically. urlscan.io adds 5-30 s per email with links. |
 | Yahoo login fails | You need an *app password* (not your Yahoo password) and 2-step verification turned on. |
 | Dashboard page won't load | Make sure the "Alert Enrichment Dashboard" window is still open, then visit <http://localhost:5000>. |

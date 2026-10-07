@@ -30,6 +30,30 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE INDEX IF NOT EXISTS idx_findings_verdict ON findings(verdict);
 CREATE INDEX IF NOT EXISTS idx_findings_processed_at ON findings(processed_at);
+
+-- Every spam/trash/block/restore the app performed, automatically or from the dashboard.
+CREATE TABLE IF NOT EXISTS mail_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id INTEGER,
+    action TEXT NOT NULL,          -- spam | trash | block | unblock | restore
+    trigger TEXT NOT NULL,         -- auto | manual | blocklist
+    success INTEGER NOT NULL,
+    detail TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mail_actions_finding ON mail_actions(finding_id);
+
+-- Senders whose future mail is trashed. Gmail also gets a real filter (gmail_filter_id);
+-- Yahoo has no API for its block list, so the pipeline enforces this table on every run.
+CREATE TABLE IF NOT EXISTS blocked_senders (
+    address TEXT PRIMARY KEY,
+    source TEXT,
+    mailbox TEXT,
+    gmail_filter_id TEXT,
+    finding_id INTEGER,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 VERDICTS = ("malicious", "suspicious", "likely_benign", "unknown")
@@ -73,6 +97,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "mailbox" not in cols:
         conn.execute("ALTER TABLE findings ADD COLUMN mailbox TEXT")
         conn.commit()
+    # Mail actions: category from Claude, where the message lives, and what was done to it.
+    for col in ("category", "message_id", "mail_folder", "uidvalidity", "mail_state", "mail_state_detail"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {col} TEXT")
+            conn.commit()
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_deleted_at ON findings(deleted_at)")
 
 
@@ -81,8 +110,9 @@ def insert_finding(conn: sqlite3.Connection, result: dict) -> int:
     cur = conn.execute(
         """INSERT INTO findings (
             source, mailbox, email_id, subject, sender, email_date, verdict, confidence,
-            summary, key_indicators, recommended_action, extracted_iocs, enrichment, processed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            summary, key_indicators, recommended_action, extracted_iocs, enrichment, processed_at,
+            category, message_id, mail_folder, uidvalidity
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             result.get("source", "gmail"),
             result.get("mailbox", ""),
@@ -98,6 +128,10 @@ def insert_finding(conn: sqlite3.Connection, result: dict) -> int:
             json.dumps(result.get("extracted_iocs", {})),
             json.dumps(result.get("enrichment", {})),
             result.get("processed_at", ""),
+            analysis.get("category", ""),
+            result.get("message_id", ""),
+            result.get("mail_folder", ""),
+            result.get("uidvalidity", ""),
         ),
     )
     conn.commit()
@@ -232,5 +266,72 @@ def purge_expired(conn: sqlite3.Connection, days: int = DEFAULT_RETENTION_DAYS,
     ids = [row["id"] for row in rows]
     placeholders = ",".join("?" for _ in ids)
     conn.execute(f"DELETE FROM findings WHERE id IN ({placeholders})", ids)
+    conn.execute(f"DELETE FROM mail_actions WHERE finding_id IN ({placeholders})", ids)
     conn.commit()
     return len(ids)
+
+
+# --- Mail actions ----------------------------------------------------------------
+
+def set_mail_state(conn: sqlite3.Connection, finding_id: int, state, detail: dict = None) -> None:
+    """state: None (where it arrived) | "spam" | "trash". detail records what's needed
+    to undo it (e.g. the folder it was moved to, whether it was in the inbox)."""
+    conn.execute(
+        "UPDATE findings SET mail_state = ?, mail_state_detail = ? WHERE id = ?",
+        (state, json.dumps(detail or {}), finding_id),
+    )
+    conn.commit()
+
+
+def log_mail_action(conn: sqlite3.Connection, finding_id, action: str, trigger: str,
+                    success: bool, detail: str = "") -> None:
+    conn.execute(
+        "INSERT INTO mail_actions (finding_id, action, trigger, success, detail, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (finding_id, action, trigger, 1 if success else 0, detail,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def list_mail_actions(conn: sqlite3.Connection, finding_ids: list) -> dict:
+    """{finding_id: [action rows, oldest first]} for the given findings."""
+    if not finding_ids:
+        return {}
+    placeholders = ",".join("?" for _ in finding_ids)
+    rows = conn.execute(
+        f"SELECT * FROM mail_actions WHERE finding_id IN ({placeholders}) ORDER BY id",
+        list(finding_ids),
+    ).fetchall()
+    out = {}
+    for row in rows:
+        out.setdefault(row["finding_id"], []).append(dict(row))
+    return out
+
+
+def add_blocked_sender(conn: sqlite3.Connection, address: str, source: str = "", mailbox: str = "",
+                       gmail_filter_id: str = None, finding_id: int = None, reason: str = "") -> None:
+    conn.execute(
+        """INSERT INTO blocked_senders (address, source, mailbox, gmail_filter_id, finding_id, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(address) DO UPDATE SET
+             gmail_filter_id = COALESCE(excluded.gmail_filter_id, blocked_senders.gmail_filter_id)""",
+        (address.lower(), source, mailbox, gmail_filter_id, finding_id, reason,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def get_blocked_sender(conn: sqlite3.Connection, address: str):
+    row = conn.execute("SELECT * FROM blocked_senders WHERE address = ?", ((address or "").lower(),)).fetchone()
+    return dict(row) if row else None
+
+
+def remove_blocked_sender(conn: sqlite3.Connection, address: str) -> int:
+    cur = conn.execute("DELETE FROM blocked_senders WHERE address = ?", ((address or "").lower(),))
+    conn.commit()
+    return cur.rowcount
+
+
+def list_blocked_senders(conn: sqlite3.Connection) -> list:
+    return [dict(r) for r in conn.execute("SELECT * FROM blocked_senders ORDER BY created_at DESC")]

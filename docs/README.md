@@ -279,6 +279,51 @@ days (default 7, set in `.env`). Purging happens automatically and opportunistic
 — on every dashboard page load and at the start of every pipeline run — so deleted
 data doesn't pile up whether or not the dashboard is open.
 
+### Mailbox actions: spam folder, Trash, block sender
+
+Claude now also gives each email a **category** (phishing, malware, scam, spam,
+legitimate, unclear) next to its verdict, and the app acts on it in the real mailbox:
+
+| Claude says | What happens |
+|---|---|
+| category **spam** | moved to the spam folder (Gmail Spam / Yahoo Bulk) |
+| verdict **malicious**, or category **phishing / malware / scam** with a malicious or suspicious verdict | moved to **Trash** and the **sender is blocked** |
+| anything else | nothing |
+
+- **Automatic only at high confidence.** Medium/low-confidence verdicts show a
+  highlighted button and a "Suggested: ..." note in the dashboard's *Mailbox actions*
+  column instead. Turn automation off with `AUTO_MAIL_ACTIONS=0` in `.env`, or for one
+  run with `python main.py --no-auto-actions`; the buttons work either way.
+- **Bulk actions:** tick rows (or *Select all*), pick *Mark as spam / Delete / Block sender /
+  Delete + block sender / Undo* in the bar above the table, and click **Apply**.
+- **Buttons on every row:** Spam, Delete, Block, and **Undo** (puts the email back where it was).
+  Each row's details list every action taken, automatic or manual, including failures.
+- **Delete = Trash**, never a permanent delete. Gmail and Yahoo empty Trash on their own
+  schedule (about 30 days).
+- **Block, Gmail:** creates a Gmail filter that sends that address to Trash (visible under
+  Gmail Settings > Filters and Blocked Addresses). This needs one extra Gmail permission
+  (`gmail.settings.basic`); the first run after updating opens your browser to sign in again.
+- **Block, Yahoo:** Yahoo doesn't let apps edit its block list, so blocked Yahoo senders are
+  kept in `findings.db` and their new mail is moved to Trash every time the analyzer runs
+  (without spending Claude/VirusTotal calls). Blocked senders from either mailbox are
+  listed, with Unblock buttons, on the dashboard's **Blocked senders** page.
+- **Safety rails:** a sender is not auto-blocked when its From address looks forged (DMARC
+  fail, or SPF and DKIM both fail), because phishers fake real companies' addresses and
+  blocking those would block the real company. The email is still trashed, and you can
+  choose "Block anyway" from the dashboard. Your own addresses and anything in
+  `NEVER_BLOCK` (comma-separated addresses or domains in `.env`) are never blocked.
+- **Older Yahoo findings** (analysed before this feature) only stored an IMAP sequence
+  number, which can point at a different email after anything in the folder moves, so their
+  buttons are disabled. Yahoo message ids are now IMAP UIDs plus the Message-ID header.
+
+- **Diagnostics (read-only):** `scripts\check_gmail.py` confirms the Gmail sign-in, both
+  permissions, and which emails *Run Gmail* would analyse (and, if none, why: read, in Spam,
+  wrong label). `scripts\check_yahoo_moves.py` shows which Yahoo folder each moved email is in now.
+- **Gmail only sees unread emails** with the label (the dashboard says so under the Run buttons).
+  If you open one in Gmail first, mark it unread again.
+- **Yahoo + a "move Spam into my report folder" rule** (e.g. Make.com/Zapier): limit the rule to
+  *unread* mail, or it will move emails the dashboard sent to Spam straight back.
+
 ## Architecture
 
 ```

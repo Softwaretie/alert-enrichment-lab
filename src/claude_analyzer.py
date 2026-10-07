@@ -36,9 +36,24 @@ smuggling, and an encrypted attachment whose password is given in the email body
 (`email_signals`). A plain document or PDF with no signals is weak evidence either way. Cite the \
 file name and the specific signal in key_indicators when attachments influence your verdict.
 
+Also classify WHAT KIND of email it is in `category`, separately from how dangerous it is:
+- "phishing": tries to steal credentials, payment details or personal data, or impersonates a \
+brand/person to trick the reader (fake login pages, fake invoices, account-locked scares).
+- "malware": delivers or links to malicious software (weaponised attachments, drive-by downloads).
+- "scam": fraud aimed at money without a credential grab (advance-fee, fake prizes, crypto/romance \
+scams, extortion/sextortion).
+- "spam": unsolicited bulk or junk mail (unwanted marketing, adult/clickbait promos, \
+newsletters the user never signed up for) that is not trying to steal anything or deliver malware.
+- "legitimate": genuine mail the user would plausibly want.
+- "unclear": not enough evidence to say.
+The mailbox owner acts on this: "spam" is moved to the spam folder; "phishing", "malware" and \
+"scam" are deleted and the sender blocked. So only use "high" confidence when the evidence would \
+justify that action without a human looking first.
+
 Respond with ONLY a JSON object, no other text, matching this shape:
 {
   "verdict": "malicious" | "suspicious" | "likely_benign" | "unknown",
+  "category": "phishing" | "malware" | "scam" | "spam" | "legitimate" | "unclear",
   "confidence": "low" | "medium" | "high",
   "summary": "1-3 sentence summary of what this email is and why it matters",
   "key_indicators": ["short bullet strings citing the specific evidence"],
@@ -124,6 +139,7 @@ class ClaudeAnalyzer:
             logger.warning("Could not parse Claude response as JSON: %s", text[:200])
             return {
                 "verdict": "unknown",
+                "category": "unclear",
                 "confidence": "low",
                 "summary": "Claude response could not be parsed as JSON.",
                 "key_indicators": [],

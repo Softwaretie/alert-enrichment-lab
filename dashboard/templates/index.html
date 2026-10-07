@@ -55,8 +55,13 @@
       <h1>Alert Enrichment Dashboard</h1>
       <p class="subtitle">Phishing reports triaged by VirusTotal + AbuseIPDB + Claude</p>
     </div>
-    <a class="deleted-nav-btn" href="{{ url_for('deleted_page') }}">🗑&#xFE0E; Deleted ({{ deleted_count }})</a>
+    <div class="header-nav">
+      <a class="deleted-nav-btn" href="{{ url_for('blocked_page') }}">⛔&#xFE0E; Blocked senders ({{ blocked_count }})</a>
+      <a class="deleted-nav-btn" href="{{ url_for('deleted_page') }}">🗑&#xFE0E; Deleted ({{ deleted_count }})</a>
+    </div>
   </header>
+
+  <div id="toast" class="toast" role="status" hidden></div>
 
   <div id="refresh-banner" class="refresh-banner" hidden>
     New findings are in. <a href="javascript:location.reload()">Refresh</a> to see them.
@@ -68,6 +73,12 @@
       <button type="button" id="run-yahoo-btn" class="run-btn" onclick="startRun('yahoo')">Run Yahoo</button>
       <button type="button" id="run-both-btn" class="run-btn run-btn-primary" onclick="startRun('both')">Run Both</button>
     </div>
+    <p class="run-hint">
+      <strong>Gmail:</strong> only <strong>unread</strong> emails with the
+      <span class="code-chip">{{ gmail_label }}</span> label are analysed{% if gmail_query %}
+      (search: <span class="code-chip">{{ gmail_query }}</span>){% endif %}. If you open one in Gmail first,
+      mark it unread again or the analyzer won't see it. Emails in Gmail's Spam or Trash are skipped too.
+    </p>
     <div id="run-status" class="run-status" hidden>
       <span id="run-status-text"></span>
       <div id="run-errors" class="run-errors" hidden></div>
@@ -120,8 +131,28 @@
     {% if verdict != 'all' or source != 'all' or search %}
       <a class="clear-link" href="{{ url_for('index') }}">Clear</a>
     {% endif %}
-    <button type="button" id="delete-selected-btn" class="danger-btn" hidden onclick="deleteSelected()"></button>
   </form>
+
+  {% if findings %}
+  <section class="bulk-bar" aria-label="Actions for selected emails">
+    <label class="bulk-select-all">
+      <input type="checkbox" id="bulk-select-all" onclick="toggleSelectAll(this)">
+      Select all ({{ findings | length }})
+    </label>
+    <span id="bulk-count" class="bulk-count">0 selected</span>
+    <select id="bulk-action" disabled onchange="updateDeleteButton()">
+      <option value="">Mailbox action…</option>
+      <option value="spam">Mark as spam</option>
+      <option value="trash">Delete (move to Trash)</option>
+      <option value="block">Block sender</option>
+      <option value="block_and_trash">Delete + block sender</option>
+      <option value="restore">Undo (put back where it was)</option>
+    </select>
+    <button type="button" id="bulk-apply-btn" class="run-btn run-btn-primary" disabled onclick="applyBulkAction()">Apply</button>
+    <button type="button" id="delete-selected-btn" class="secondary-btn bulk-remove-btn" hidden onclick="deleteSelected()"
+            title="Hide these findings from the dashboard (the emails themselves are not touched)"></button>
+  </section>
+  {% endif %}
 
   <section class="table-wrap">
     {% if findings %}
@@ -142,6 +173,7 @@
             </a>
           </th>
           {% endfor %}
+          <th>Mailbox actions</th>
         </tr>
       </thead>
       <tbody>
@@ -154,12 +186,48 @@
           </td>
           <td class="sender-cell">{{ f.sender }}</td>
           <td>{{ f.subject }}</td>
-          <td><span class="badge badge-{{ f.verdict }}">{{ f.verdict.replace('_', ' ') }}</span></td>
+          <td>
+            <span class="badge badge-{{ f.verdict }}">{{ f.verdict.replace('_', ' ') }}</span>
+            {% if f.category %}<div class="category-text">{{ f.category.replace('_', ' ') }}</div>{% endif %}
+          </td>
           <td>{{ f.confidence or "—" }}</td>
           <td class="timestamp-cell">{{ f.processed_at }}</td>
+          <td class="mail-cell" onclick="event.stopPropagation()">
+            {% set addr = f.sender_address | e %}
+            {% if f.mail_state == 'spam' %}<span class="badge state-badge state-spam">In spam</span>{% endif %}
+            {% if f.mail_state == 'trash' %}<span class="badge state-badge state-trash">In Trash</span>{% endif %}
+            {% if f.sender_blocked %}<span class="badge state-badge state-blocked">Sender blocked</span>{% endif %}
+            {% if not f.actionable %}
+              <span class="text-muted small-note" title="Analysed before mail actions existed; act on it in Yahoo Mail directly.">Not available for this older email</span>
+            {% else %}
+            <div class="mail-buttons">
+              {% if f.mail_state %}
+                <button type="button" class="mail-btn" title="Put the email back where it was"
+                        onclick="mailAction({{ f.id }}, 'restore', this)">Undo</button>
+              {% endif %}
+              {% if not f.mail_state %}
+                <button type="button" class="mail-btn {% if f.suggested_action == 'spam' %}suggested{% endif %}"
+                        title="Move this email to the spam folder in {{ f.source.title() }}"
+                        onclick="mailAction({{ f.id }}, 'spam', this)">Spam</button>
+              {% endif %}
+              {% if f.mail_state != 'trash' %}
+                <button type="button" class="mail-btn mail-btn-danger {% if f.suggested_action == 'block_and_trash' %}suggested{% endif %}"
+                        title="Move this email to Trash in {{ f.source.title() }} (recoverable, Undo here)"
+                        onclick="mailAction({{ f.id }}, 'trash', this)">Delete</button>
+              {% endif %}
+              {% if not f.sender_blocked %}
+                <button type="button" class="mail-btn mail-btn-danger {% if f.suggested_action == 'block_and_trash' %}suggested{% endif %}"
+                        data-address="{{ addr }}" onclick="blockSender({{ f.id }}, this)">Block</button>
+              {% endif %}
+            </div>
+            {% if f.suggested_action and not f.mail_state and (f.confidence or '') != 'high' %}
+              <div class="small-note suggested-note">Suggested: {{ 'move to spam' if f.suggested_action == 'spam' else ('delete' if f.sender_blocked else 'delete + block') }}</div>
+            {% endif %}
+            {% endif %}
+          </td>
         </tr>
         <tr id="detail-{{ f.id }}" class="detail-row" hidden>
-          <td colspan="7">
+          <td colspan="8">
             <div class="detail-panel">
               <p><strong>Summary</strong><br>{{ f.summary or "No summary provided." }}</p>
               {% if f.key_indicators %}
@@ -204,6 +272,17 @@
               <p class="text-muted">Static analysis only: files were hashed and inspected in memory, never opened, run or uploaded.</p>
               {% endif %}
               <p><strong>Recommended action</strong><br>{{ f.recommended_action or "—" }}</p>
+              {% if f.mail_history %}
+              <p><strong>Mailbox actions</strong></p>
+              <ul class="action-history">
+                {% for a in f.mail_history %}
+                <li class="{{ 'ok' if a.success else 'failed' }}">
+                  <span class="text-muted">{{ a.created_at[:19].replace('T', ' ') }} UTC · {{ a.trigger }}</span>
+                  {{ '✓' if a.success else '✗' }} {{ a.detail }}
+                </li>
+                {% endfor %}
+              </ul>
+              {% endif %}
             </div>
           </td>
         </tr>
@@ -226,6 +305,50 @@
       updateDeleteButton();
     }
 
+    const BULK_LABELS = {
+      spam: 'Mark as spam', trash: 'Delete (move to Trash)', block: 'Block sender',
+      block_and_trash: 'Delete + block sender', restore: 'Undo',
+    };
+
+    async function applyBulkAction() {
+      const ids = selectedIds();
+      const action = document.getElementById('bulk-action').value;
+      if (!ids.length || !action) return;
+      const label = BULK_LABELS[action];
+      const blocking = action === 'block' || action === 'block_and_trash';
+      const ok = await showConfirm(
+        `${label} for ${ids.length} selected email(s)?` +
+        (blocking ? ' Future mail from those senders goes straight to Trash; forged senders are skipped, ' +
+                    'and you can unblock anyone on the Blocked senders page.' : '') +
+        (action === 'trash' || action === 'block_and_trash' ? ' Trashed emails can be put back with Undo.' : ''),
+        label);
+      if (!ok) return;
+
+      const applyBtn = document.getElementById('bulk-apply-btn');
+      applyBtn.disabled = true;
+      applyBtn.textContent = `Working on ${ids.length}…`;
+      try {
+        const resp = await fetch('/api/findings/bulk-mail-action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids, action }),
+        });
+        const body = await resp.json().catch(() => ({ ok: 0, failed: ids.length, results: [] }));
+        const problems = (body.results || []).filter(r => !r.ok);
+        let msg = `${label}: ${body.ok} done`;
+        if (problems.length) {
+          msg += `, ${problems.length} not done — ` +
+            problems.slice(0, 3).map(r => r.message).join(' · ') + (problems.length > 3 ? ' …' : '');
+        }
+        showToast(msg, problems.length > 0);
+        setTimeout(() => location.reload(), problems.length ? 4000 : 1200);
+      } catch (err) {
+        showToast('Could not reach the dashboard server: ' + err, true);
+        applyBtn.disabled = false;
+        applyBtn.textContent = 'Apply';
+      }
+    }
+
     function selectedIds() {
       return Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => parseInt(cb.value, 10));
     }
@@ -234,19 +357,26 @@
       const count = selectedIds().length;
       const btn = document.getElementById('delete-selected-btn');
       btn.hidden = count === 0;
-      btn.textContent = `Delete ${count} selected`;
-      const selectAll = document.getElementById('select-all');
-      if (selectAll) {
-        const total = document.querySelectorAll('.row-checkbox').length;
-        selectAll.checked = count > 0 && count === total;
+      btn.textContent = `Remove ${count} from dashboard`;
+      const total = document.querySelectorAll('.row-checkbox').length;
+      ['select-all', 'bulk-select-all'].forEach(id => {
+        const box = document.getElementById(id);
+        if (box) box.checked = count > 0 && count === total;
+      });
+      const actionSelect = document.getElementById('bulk-action');
+      if (actionSelect) {
+        actionSelect.disabled = count === 0;
+        document.getElementById('bulk-count').textContent = `${count} selected`;
+        document.getElementById('bulk-apply-btn').disabled = count === 0 || !actionSelect.value;
       }
     }
 
-    function showConfirm(message) {
+    function showConfirm(message, okLabel = 'Delete') {
       return new Promise(resolve => {
         const modal = document.getElementById('confirm-modal');
         document.getElementById('confirm-modal-text').textContent = message;
         const okBtn = document.getElementById('confirm-modal-ok');
+        okBtn.textContent = okLabel;
         const cancelBtn = document.getElementById('confirm-modal-cancel');
 
         const cleanup = (result) => {
@@ -268,8 +398,9 @@
       const ids = selectedIds();
       if (ids.length === 0) return;
       const ok = await showConfirm(
-        `Delete ${ids.length} finding(s)? You can restore them from the Deleted page ` +
-        `within {{ retention_days }} days, after which they're permanently removed.`
+        `Remove ${ids.length} finding(s) from the dashboard? The emails in your mailbox are not touched. ` +
+        `You can restore the findings from the Deleted page within {{ retention_days }} days, ` +
+        `after which they're permanently removed.`, 'Remove'
       );
       if (!ok) return;
 
@@ -279,6 +410,59 @@
         body: JSON.stringify({ ids }),
       });
       if (resp.ok) location.reload();
+    }
+
+    // --- Mailbox actions (spam folder / Trash / block sender) ---------------
+    let toastTimer = null;
+    function showToast(message, isError) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.toggle('toast-error', !!isError);
+      toast.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.hidden = true; }, isError ? 9000 : 3500);
+    }
+
+    async function postMailAction(id, action, force) {
+      const resp = await fetch(`/api/findings/${id}/mail-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, force: !!force }),
+      });
+      const body = await resp.json().catch(() => ({ ok: false, message: `Server error (${resp.status})` }));
+      return body;
+    }
+
+    async function mailAction(id, action, btn, force) {
+      const row = btn.closest('td');
+      row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      const original = btn.textContent;
+      btn.textContent = 'Working…';
+      try {
+        const result = await postMailAction(id, action, force);
+        if (result.needs_confirm) {
+          const ok = await showConfirm(result.message + '. Block anyway?', 'Block anyway');
+          if (ok) return mailAction(id, action, btn, true);
+        } else if (result.ok) {
+          showToast(result.message, false);
+          setTimeout(() => location.reload(), 700);
+          return;
+        } else {
+          showToast(result.message || 'That didn\'t work.', true);
+        }
+      } catch (err) {
+        showToast('Could not reach the dashboard server: ' + err, true);
+      }
+      btn.textContent = original;
+      row.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+
+    async function blockSender(id, btn) {
+      const address = btn.dataset.address || 'this sender';
+      const ok = await showConfirm(
+        `Block ${address}? Future mail from this address goes straight to Trash. ` +
+        `You can unblock them any time on the Blocked senders page.`, 'Block');
+      if (ok) mailAction(id, 'block', btn);
     }
 
     const RUN_BUTTON_IDS = ['run-gmail-btn', 'run-yahoo-btn', 'run-both-btn'];

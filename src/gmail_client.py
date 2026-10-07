@@ -1,5 +1,11 @@
-"""Read-only Gmail access for pulling forwarded phishing reports."""
+"""Gmail access: pull phishing reports, and act on Claude's verdicts.
+
+Mail actions are deliberately reversible: "delete" moves a message to Trash
+(messages.trash, recoverable for ~30 days), never permanent deletion, and
+"block" is an ordinary Gmail filter you can see and remove under
+Settings > Filters and Blocked Addresses."""
 import base64
+import json
 import logging
 import os
 
@@ -14,15 +20,47 @@ from src.auth_headers import parse_authentication_results
 from src.email_message import EmailMessage
 from src.html_text import html_to_text
 
-# Read-only: this tool never sends, deletes, or modifies mail content,
-# it only removes the UNREAD label once an alert has been processed.
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+# gmail.modify: read mail, change labels (UNREAD, SPAM), and move to Trash. It cannot
+# permanently delete mail or send it.
+# gmail.settings.basic: create/remove the filters used for "block sender".
+# Adding a scope means signing in once more; authenticate() notices an older token
+# that lacks one and opens the browser sign-in automatically.
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+]
 
 logger = logging.getLogger(__name__)
 
 
+def _token_scopes(token_path: str) -> set:
+    try:
+        with open(token_path, encoding="utf-8") as fh:
+            scopes = json.load(fh).get("scopes") or []
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return set(scopes.split() if isinstance(scopes, str) else scopes)
+
+
+def _missing_scopes(token_path: str) -> bool:
+    """True when the saved token lists its scopes and one this version needs isn't there.
+    (A token that doesn't list scopes at all is left to the normal flow.)"""
+    granted = _token_scopes(token_path)
+    return bool(granted) and not set(SCOPES) <= granted
+
+
 def authenticate(credentials_path: str, token_path: str):
     creds = None
+    if os.path.exists(token_path) and _missing_scopes(token_path):
+        # Saved sign-in predates a permission this version needs (e.g. block-sender
+        # filters). A refresh can't add scopes, so sign in again once.
+        logger.warning("Gmail needs an extra permission (manage filters, for 'block sender'). "
+                       "Opening your browser to sign in again...")
+        creds = _interactive_login(credentials_path)
+        with open(token_path, "w") as token_file:
+            token_file.write(creds.to_json())
+        return build("gmail", "v1", credentials=creds)
+
     if os.path.exists(token_path):
         try:
             creds = Credentials.from_authorized_user_file(token_path, SCOPES)
@@ -208,6 +246,7 @@ def get_message(service, message_id: str, mailbox: str = "", max_attachment_byte
         mailbox=mailbox,
         auth_results=parse_authentication_results(_header(headers, "Authentication-Results")),
         attachments=fetch_attachments(service, message_id, payload, max_attachment_bytes),
+        message_id=_header(headers, "Message-ID"),
     )
 
 
@@ -215,6 +254,63 @@ def mark_processed(service, message_id: str) -> None:
     service.users().messages().modify(
         userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
     ).execute()
+
+
+def get_label_ids(service, message_id: str) -> list:
+    msg = service.users().messages().get(userId="me", id=message_id, format="minimal").execute()
+    return msg.get("labelIds", [])
+
+
+def move_to_spam(service, message_id: str) -> None:
+    """What Gmail's "Report spam" does: label SPAM and take it out of the inbox."""
+    service.users().messages().modify(
+        userId="me", id=message_id, body={"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]}
+    ).execute()
+
+
+def restore_from_spam(service, message_id: str, back_to_inbox: bool = True) -> None:
+    body = {"removeLabelIds": ["SPAM"]}
+    if back_to_inbox:
+        body["addLabelIds"] = ["INBOX"]
+    service.users().messages().modify(userId="me", id=message_id, body=body).execute()
+
+
+def trash_message(service, message_id: str) -> None:
+    """Move to Trash (Gmail empties Trash after ~30 days). Not a permanent delete."""
+    service.users().messages().trash(userId="me", id=message_id).execute()
+
+
+def untrash_message(service, message_id: str) -> None:
+    service.users().messages().untrash(userId="me", id=message_id).execute()
+
+
+def find_block_filter(service, address: str):
+    """Id of an existing filter that already trashes mail from `address`, if any."""
+    filters = service.users().settings().filters().list(userId="me").execute().get("filter", [])
+    for f in filters:
+        if (f.get("criteria", {}).get("from", "").strip().lower() == address.lower()
+                and "TRASH" in f.get("action", {}).get("addLabelIds", [])):
+            return f.get("id")
+    return None
+
+
+def create_block_filter(service, address: str) -> str:
+    """Gmail's API has no "Block" button, so blocking = a filter that sends everything
+    from `address` straight to Trash (what Gmail's own Block does, minus the UI).
+    Reuses an identical filter if one exists. Returns the filter id."""
+    existing = find_block_filter(service, address)
+    if existing:
+        return existing
+    created = service.users().settings().filters().create(
+        userId="me",
+        body={"criteria": {"from": address},
+              "action": {"addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]}},
+    ).execute()
+    return created["id"]
+
+
+def delete_filter(service, filter_id: str) -> None:
+    service.users().settings().filters().delete(userId="me", id=filter_id).execute()
 
 
 def mark_as_spam(service, message_id: str) -> None:

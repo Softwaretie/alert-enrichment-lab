@@ -476,3 +476,120 @@ td input[type="checkbox"] {
 .sev-high { color: var(--malicious); border-color: var(--malicious); }
 .sev-medium { color: var(--suspicious); border-color: var(--suspicious); }
 .sev-low { color: var(--unknown); border-color: var(--unknown); }
+
+/* --- Mailbox actions (spam folder / Trash / block sender) ----------------- */
+:root {
+  --state-spam: #f5a623;
+  --state-trash: #e5484d;
+  --state-blocked: #c084fc;
+}
+
+.header-nav { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.category-text {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.mail-cell { min-width: 190px; }
+.mail-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
+.mail-btn {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.mail-btn:hover:not(:disabled) { border-color: var(--accent); }
+.mail-btn-danger:hover:not(:disabled) { border-color: var(--malicious); color: var(--malicious); }
+.mail-btn:disabled { opacity: 0.5; cursor: wait; }
+.mail-btn.suggested { border-color: var(--suspicious); box-shadow: inset 0 0 0 1px var(--suspicious); }
+
+.state-badge { text-transform: none; margin: 0 4px 4px 0; font-size: 0.72rem; }
+.state-spam { color: var(--state-spam); border-color: var(--state-spam); background: rgba(245, 166, 35, 0.12); }
+.state-trash { color: var(--state-trash); border-color: var(--state-trash); background: rgba(229, 72, 77, 0.12); }
+.state-blocked { color: var(--state-blocked); border-color: var(--state-blocked); background: rgba(192, 132, 252, 0.12); }
+
+.small-note { font-size: 0.72rem; color: var(--text-muted); }
+.suggested-note { margin-top: 4px; color: var(--suspicious); }
+
+.action-history { list-style: none; padding-left: 0; }
+.action-history li { margin: 2px 0; }
+.action-history li.failed { color: var(--malicious); }
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  max-width: min(420px, calc(100vw - 40px));
+  background: var(--panel);
+  border: 1px solid var(--likely_benign);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 0.88rem;
+  z-index: 200;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+.toast[hidden] { display: none; }
+.toast-error { border-color: var(--malicious); }
+
+.page-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-width: 820px;
+  margin: 0 0 20px;
+}
+.url-text { word-break: break-all; }
+header + .toast + .page-note, header + .page-note { margin-top: 16px; }
+.deleted-link { color: var(--accent); }
+
+/* --- Bulk actions bar ------------------------------------------------------ */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: -8px 0 16px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.88rem;
+}
+.bulk-select-all { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.bulk-count { color: var(--text-muted); min-width: 80px; }
+.bulk-bar select {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.88rem;
+}
+.bulk-bar select:disabled { opacity: 0.5; }
+.bulk-bar .run-btn { padding: 8px 16px; }
+.bulk-remove-btn { margin-left: auto; }
+
+.run-hint {
+  margin: 12px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.run-hint strong { color: var(--text); }
+.code-chip {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.78rem;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text);
+}
